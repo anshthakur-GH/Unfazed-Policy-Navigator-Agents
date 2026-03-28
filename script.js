@@ -16,7 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSessionId = null;  // shared: set by handleFile, read by openChat
     let discoveredPolicies = [];  // Store discovery results for detail view
 
-    const WEBHOOK_URL = 'https://test-n8n.zynd.ai/webhook/979cfe28-657f-4314-b806-5d7df0c989c9/pay';
+    const WEBHOOK_URL = 'https://n8n.cognigenai.in/webhook/0577d629-452d-45d5-ba0a-260934fcc50e';
 
     browseBtn.addEventListener('click', () => fileInput.click());
 
@@ -447,7 +447,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             console.error('Upload Error:', error);
             statusText.textContent = "Upload Failed";
-            statusText.style.color = "#f43f5e";
+            statusText.style.color = "#ef4444";
             fileNameDisplay.textContent = "Please try again. " + error.message;
 
             setTimeout(() => {

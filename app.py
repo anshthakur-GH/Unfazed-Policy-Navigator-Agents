@@ -6,7 +6,7 @@ app = Flask(__name__, static_folder='.')
 
 # Configurable Webhook Endpoints
 TARGET_URLS = {
-    "process_doc": "https://test-n8n.zynd.ai/webhook/979cfe28-657f-4314-b806-5d7df0c989c9/pay",
+    "process_doc": "https://n8n.cognigenai.in/webhook/0577d629-452d-45d5-ba0a-260934fcc50e",
     "eligibility": "https://test-n8n.zynd.ai/webhook/299f8076-3169-4b30-99d7-66b25015088b",
     "other_policies": "https://test-n8n.zynd.ai/webhook/1cf41349-c5de-4ed3-8be9-e764406dc28e/pay"
 }
