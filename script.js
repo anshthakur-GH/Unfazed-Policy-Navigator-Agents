@@ -16,7 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSessionId = null;  // shared: set by handleFile, read by openChat
     let discoveredPolicies = [];  // Store discovery results for detail view
 
-    const WEBHOOK_URL = 'https://n8n.cognigenai.in/webhook/0577d629-452d-45d5-ba0a-260934fcc50e';
+    // (Previously hardcoded webhook constant removed, using proxy endpoint below)
 
     browseBtn.addEventListener('click', () => fileInput.click());
 
@@ -61,32 +61,52 @@ document.addEventListener('DOMContentLoaded', () => {
     // This function detects that case and extracts the structured policy
     // from whichever shape the response arrives in.
     // ─────────────────────────────────────────────────────────────────
-    function normaliseWebhookResponse(raw) {
+    function normaliseWebhookResponse(raw, depth = 0) {
+        if (depth > 5) return null; // Avoid excessive recursion
+        if (!raw) return null;
+
         if (Array.isArray(raw)) {
             const firstItem = raw[0];
             if (firstItem && (firstItem.policy_name || firstItem.session_id)) return firstItem;
             for (const item of raw) {
-                const found = normaliseWebhookResponse(item);
+                const found = normaliseWebhookResponse(item, depth + 1);
                 if (found) return found;
             }
             return null;
         }
 
-        if (raw && typeof raw === 'object') {
+        if (typeof raw === 'object') {
             if (raw.policy_name || raw.session_id) return raw;
 
             if (raw.pageContent && raw.metadata) {
                 console.warn('[WEBHOOK BUG] n8n returned raw document-loader output. Parsing text...');
                 const parsed = extractPolicyFromPageContent(raw.pageContent);
-                // Preserve session_id if it exists anywhere in the wrapper
                 const sid = deepSearchSessionId(raw);
                 if (parsed && sid) parsed.session_id = sid;
                 return parsed;
             }
 
+            if (raw.content && raw.content.parts && raw.content.parts[0]) {
+                console.log('[NORMATOR] Detected Google AI Node format. Extracting parts...');
+                const aiText = raw.content.parts[0].text;
+                if (aiText) {
+                    // Try to find if there's a JSON block inside the AI text
+                    const innerJsonMatch = aiText.match(/(\{|\[)[\s\S]*(\}|\])/);
+                    if (innerJsonMatch) {
+                        try {
+                            const innerData = JSON.parse(innerJsonMatch[0]);
+                            const innerFound = normaliseWebhookResponse(innerData, depth + 1);
+                            if (innerFound) return innerFound;
+                        } catch (e) {}
+                    }
+                    // Fallback: extract from raw text
+                    return extractPolicyFromPageContent(aiText);
+                }
+            }
+
             for (const val of Object.values(raw)) {
                 if (val && typeof val === 'object') {
-                    const found = normaliseWebhookResponse(val);
+                    const found = normaliseWebhookResponse(val, depth + 1);
                     if (found) return found;
                 }
             }
@@ -256,10 +276,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        // ── MAIN FIX: normalise before rendering ──
-        let policy = normaliseWebhookResponse(data);
+        // Normalize if it's an array or wrapper
+        let policy = (data && !data.policy_name) ? normaliseWebhookResponse(data) : data;
 
-        if (!policy || Object.keys(policy).length === 0) {
+        if (!policy || (typeof policy === 'object' && Object.keys(policy).length === 0)) {
+            console.error('[RENDER ERROR] No structured data found after normalization. Raw:', data);
             container.innerHTML = '<p class="policy-text">No structured policy data was extracted from the document.</p>';
             return;
         }
@@ -382,10 +403,10 @@ document.addEventListener('DOMContentLoaded', () => {
         uploadContent.classList.add('hidden');
         processingContent.classList.remove('hidden');
         fileNameDisplay.textContent = file.name;
-        statusText.textContent = "Processing... Please wait (est. 15s)";
-
+        
+        let heartbeat = null;
         try {
-            // ── NEW APPROACH: Frontend generates the Session ID ──
+            // Frontend generates the Session ID
             const generatedSid = typeof crypto.randomUUID === 'function'
                 ? crypto.randomUUID()
                 : `sess_${Math.random().toString(36).substring(2, 11)}_${Date.now()}`;
@@ -394,58 +415,70 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log('✨ Generated Frontend Session ID:', currentSessionId);
 
             const formData = new FormData();
-            formData.append('file', file, file.name);
-            formData.append('session_id', currentSessionId); // Backend-required format
+            formData.append('file', file, file.name); // Using 'file' as expected by n8n workflow
+            formData.append('session_id', currentSessionId);
 
-            // Route through proxy for better logging and troubleshooting
             const proxyUploadUrl = `/proxy?target=process_doc`;
+            
+            // Continuous heartbeat for UX
+            let dotCount = 0;
+            heartbeat = setInterval(() => {
+                dotCount = (dotCount + 1) % 4;
+                statusText.textContent = "Processing" + ".".repeat(dotCount) + " Please wait";
+            }, 1000);
 
-            const minUxWait = new Promise(resolve => setTimeout(resolve, 1500));
+            console.log('🚀 Sending request to proxy:', proxyUploadUrl);
             const uploadReq = fetch(proxyUploadUrl, {
                 method: 'POST',
                 body: formData
             });
-            const [response] = await Promise.all([uploadReq, minUxWait]);
 
-            if (!response.ok) throw new Error(`Server returned ${response.status} ${response.statusText}`);
+            console.log('🕒 Fetch initiated, waiting for response...');
 
+            // Remove fixed UX wait to ensure data loads as soon as received
+            const response = await uploadReq;
+            clearInterval(heartbeat);
+
+            console.log('✨ Response received from n8n. Status:', response.status);
+            console.log('📋 Content-Type:', response.headers.get('Content-Type'));
+            console.log('✨ Response received from n8n. Length:', response.headers.get('Content-Length') || 'Unknown');
+            
             const responseText = await response.text();
-            console.log("Raw Webhook Response text:", responseText);
+            console.log("✨ Response received from n8n. Length:", responseText.length);
+            console.log("📄 Raw Response Content:", responseText.substring(0, 500) + (responseText.length > 500 ? "..." : ""));
 
             let resultData;
             try {
-                resultData = JSON.parse(responseText);
+                // Try to find a JSON block in the response text if it exists
+                const jsonMatch = responseText.match(/(\{|\[)[\s\S]*(\}|\])/);
+                const stringToParse = jsonMatch ? jsonMatch[0] : responseText;
+                resultData = JSON.parse(stringToParse);
             } catch (err) {
-                console.error("JSON Parsing Error:", err);
-                resultData = { warning: "Webhook responded with invalid JSON format.", raw: responseText };
+                console.warn("JSON Parsing Error, falling back to raw object:", err);
+                resultData = { raw: responseText };
             }
 
-            console.log("Parsed Webhook Data:", resultData);
+            // Normalise the data into a single policy object
+            const policyEntry = normaliseWebhookResponse(resultData) || resultData;
 
+            // ENSURE the processing screen is hidden before rendering
             processingContent.classList.add('hidden');
             successContent.classList.remove('hidden');
 
-            const policyEntry = normaliseWebhookResponse(resultData);
+            renderPolicyData(policyEntry, policyResultContainer);
 
-            // Expose for troubleshooting
-            window.LAST_SESSION_DATA = {
-                id: currentSessionId,
-                source: "Frontend Generated",
-                raw: resultData
-            };
-
-            renderPolicyData(policyEntry || resultData, policyResultContainer);
-
+            // Show results almost immediately
             setTimeout(() => {
                 successContent.classList.add('hidden');
                 resultContent.classList.remove('hidden');
                 mainContainer.classList.add('result-active');
                 document.body.classList.add('result-active');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
-            }, 1500);
+            }, 300);
 
         } catch (error) {
             console.error('Upload Error:', error);
+            processingContent.classList.add('hidden'); // Fail-safe: hide on error
             statusText.textContent = "Upload Failed";
             statusText.style.color = "#ef4444";
             fileNameDisplay.textContent = "Please try again. " + error.message;
@@ -453,7 +486,9 @@ document.addEventListener('DOMContentLoaded', () => {
             setTimeout(() => {
                 resetFlow();
                 statusText.style.color = "";
-            }, 3000);
+            }, 5000);
+        } finally {
+            clearInterval(heartbeat);
         }
     }
 
@@ -552,6 +587,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
             for (const key of sortedKeys) {
                 const val = obj[key];
+                
+                // Handle Google AI Node nested in eligibility result
+                if (key === 'content' && val?.parts?.[0]?.text) {
+                    const aiPayload = val.parts[0].text;
+                    const jsonMatch = aiPayload.match(/(\{|\[)[\s\S]*(\}|\])/);
+                    if (jsonMatch) {
+                        try {
+                            const parsed = JSON.parse(jsonMatch[0]);
+                            const found = deepSearchEligibilityResult(parsed);
+                            if (found) return found;
+                        } catch (e) { }
+                    }
+                }
+
                 if (typeof val === 'string' && (val.trim().startsWith('{') || val.trim().startsWith('['))) {
                     try {
                         const parsed = JSON.parse(val.replace(/```json\n?|```/g, '').trim());
@@ -578,10 +627,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Try direct parse first
         try {
-            const clean = responseText.replace(/```json\n?|```/g, '').trim();
-            parsed = JSON.parse(clean);
+            // Find JSON block if it exists (robust extraction)
+            const jsonMatch = responseText.match(/(\{|\[)[\s\S]*(\}|\])/);
+            const stringToParse = jsonMatch ? jsonMatch[0] : responseText;
+            parsed = JSON.parse(stringToParse.replace(/```json\n?|```/g, '').trim());
         } catch (e) {
-            // Try to extract JSON blocks
+            console.warn("[CHAT] JSON Parse failed, trying blocks...", e);
             const blocks = responseText.match(/\{[\s\S]*\}|\[[\s\S]*\]/g);
             if (blocks) {
                 for (const b of blocks) {
